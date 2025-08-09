@@ -6,6 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os 
 
 def generate_scree_plot(df, save_plot=True):
     """
@@ -278,6 +279,106 @@ def feature_importance_analysis(df, n_components=10):
     
     return components_df, pca, scaler, imputer
 
+# Add this function to your existing src/pca_analysis.py
+
+def apply_pca_and_save(df, n_components=5, output_file='data/processed/pca_reduced_features.csv'):
+    """
+    Applies PCA transformation using the determined number of components
+    and saves the transformed features.
+    
+    Args:
+        df (pd.DataFrame): The cleaned input dataframe.
+        n_components (int): Number of principal components to retain 
+                           (based on your scree plot analysis, e.g., 5 for ~80% variance).
+        output_file (str): Path to save the transformed PCA features.
+    """
+    print(f"\nApplying PCA to reduce to {n_components} components...")
+    
+    # --- Replicate preprocessing steps for consistency ---
+    # Select numerical features for PCA (same logic as analysis)
+    numerical_features = df.select_dtypes(include=[np.number]).columns.tolist()
+    exclude_cols = ['order_date', 'order_year', 'order_month', 'order_day', 
+                   'order_quarter', 'order_week', 'delivery_delay', 'Unnamed']
+    numerical_features = [col for col in numerical_features 
+                         if col not in exclude_cols and 'Unnamed' not in col and col in df.columns]
+
+    # Extract numerical data
+    numerical_data = df[numerical_features]
+    
+    # Handle missing values (same imputer strategy)
+    # Note: We assume no *new* completely empty columns appear. 
+    # If they do, they would be dropped by SimpleImputer.
+    imputer = SimpleImputer(strategy='median', keep_empty_features=False)
+    imputed_data = imputer.fit_transform(numerical_data)
+    
+    # Get the actual feature names after imputation 
+    # (in case SimpleImputer dropped any completely empty columns)
+    non_empty_features = [col for col in numerical_features 
+                         if not numerical_data[col].isnull().all()]
+    print(f"Features used for PCA after imputation check: {len(non_empty_features)}")
+
+    # Convert back to DataFrame for clarity (optional, but helps ensure column alignment)
+    # imputed_df = pd.DataFrame(imputed_data, columns=non_empty_features, index=df.index) # Not strictly needed for scaling
+
+    # Standardize the data (important for PCA)
+    print("Standardizing data...")
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(imputed_data) # Use imputed_data directly
+    
+    # --- Apply PCA ---
+    print("Fitting PCA...")
+    pca = PCA(n_components=n_components)
+    pca_transformed = pca.fit_transform(scaled_data)
+    
+    # --- Save Transformed Data ---
+    # Create a DataFrame for the transformed data
+    pca_columns = [f'PC{i+1}' for i in range(n_components)]
+    pca_df = pd.DataFrame(pca_transformed, columns=pca_columns, index=df.index) 
+    
+    # Add back any crucial non-PCA features if needed for modeling 
+    # (e.g., identifiers, target variables, or temporal features not used in PCA)
+    # Example: Add order_date if it's important for time-series modeling
+    # if 'order_date' in df.columns:
+    #     pca_df['order_date'] = df['order_date']
+    # Example: Add the target variable for the XGBoost part
+    if 'Late_delivery_risk' in df.columns:
+        pca_df['Late_delivery_risk'] = df['Late_delivery_risk']
+    # Add other relevant non-numerical/non-temporal features if necessary for XGBoost
+    
+    try:
+        # Ensure the output directory exists
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        pca_df.to_csv(output_file, index=False)
+        print(f"PCA-transformed data saved successfully to {output_file}")
+        print(f"Shape of transformed data: {pca_df.shape}")
+        print(f"Columns: {list(pca_df.columns)}")
+        
+        # --- Save the PCA model, scaler, and imputer for potential later use/reproducibility ---
+        import joblib
+        joblib.dump(pca, f'models/pca_model_{n_components}components.pkl')
+        joblib.dump(scaler, 'models/scaler_for_pca.pkl')
+        joblib.dump(imputer, 'models/imputer_for_pca.pkl') # Save imputer config
+        print("PCA model, scaler, and imputer saved to 'models/' directory.")
+        
+        # --- Save feature importance/details ---
+        components_df = pd.DataFrame(
+            pca.components_.T, # Transpose to have features as rows
+            columns=pca_columns,
+            index=non_empty_features # Use the features that actually went into PCA
+        )
+        components_report_file = 'results/eda/final_pca_components_report.csv'
+        os.makedirs(os.path.dirname(components_report_file), exist_ok=True)
+        components_df.to_csv(components_report_file)
+        print(f"PCA components (feature loadings) saved to {components_report_file}")
+        print(f"Total variance explained by {n_components} components: {np.sum(pca.explained_variance_ratio_):.4f}")
+        
+    except Exception as e:
+        print(f"Error saving PCA results: {e}")
+        
+    return pca_df, pca, scaler, imputer # Return objects in case needed immediately
+
+
+# Main execution
 # Main execution
 if __name__ == "__main__":
     # Load your processed data
@@ -285,25 +386,44 @@ if __name__ == "__main__":
         df = pd.read_csv('data/processed/cleaned_supply_chain_data.csv')
         print("Dataset loaded successfully!")
         print(f"Dataset shape: {df.shape}")
-        
+
+        # --- Existing Analysis Steps ---
         # Generate scree plot with proper NaN handling
         pca_model, scaler, imputer, exp_var, cum_var, features_used = generate_scree_plot(df)
-        
+
         # Apply elbow method analysis
         elbow_pca, elbow_scaler, elbow_imputer = elbow_method_analysis(df)
-        
+
         # Feature importance analysis
         components_df, feature_pca, feature_scaler, feature_imputer = feature_importance_analysis(df)
         components_df.to_csv('results/eda/pca_components_analysis.csv')
-        
+
         print(f"\nFinal analysis used {len(features_used)} features:")
-        print(features_used)
+        # print(features_used) # Optional: print list of features
         print("\nPCA analysis completed successfully!")
         print("Results saved to results/eda/ directory")
+        # --- End of Existing Analysis Steps ---
+
+        # --- NEW: Apply PCA Transformation and Save ---
+        # IMPORTANT: Set n_components_for_modeling based on your scree plot analysis.
         
+        n_components_for_modeling = 9 # <--- YOU MUST SET THIS CORRECTLY ---
+
+        if n_components_for_modeling is not None and n_components_for_modeling > 0:
+            print(f"\n--- Applying Final PCA with {n_components_for_modeling} components ---")
+            # Call the function you defined earlier
+            pca_reduced_data, fitted_pca, fitted_scaler, fitted_imputer = apply_pca_and_save(
+                df,
+                n_components=n_components_for_modeling,
+                output_file='data/processed/pca_reduced_features_for_modeling.csv' # Or your preferred name
+            )
+            print("\nFinal PCA transformation applied and data saved for modeling.")
+        else:
+            print("\nSkipping final PCA transformation as n_components_for_modeling is not set correctly.")
+
     except FileNotFoundError:
         print("Error: Could not find processed data file. Please run preprocessing first.")
     except Exception as e:
-        print(f"Error during PCA analysis: {e}")
+        print(f"Error during PCA analysis or transformation: {e}")
         import traceback
-        traceback.print_exc()
+        traceback.print_exc() # This will print the full error stack trace for debugging
